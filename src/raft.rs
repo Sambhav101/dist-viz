@@ -26,6 +26,7 @@ struct Node {
 }
 
 impl Node {
+	// constructor for our Node class
 	fn new(id: u64, rx: mpsc::Receiver<Message>) -> Self {
 		Node {
 			id,
@@ -37,10 +38,31 @@ impl Node {
 		}
 	}
 	
+	// a candidate will start election and votes for itself
 	fn start_election(&mut self) {
 		self.state = NodeState::Candidate;
 		self.current_term += 1;
 		self.voted_for = Some(self.id);
 		self.votes_received = 1;
+	}
+	
+	// when a node receives a requestVote, decide to grant the vote or not
+	fn handle_message(&mut self, msg: Message) {
+		match msg {
+			// if a node is requesting vote, update voted for if conditions met
+			Message::RequestVote { from, term } => {
+				if term >= self.current_term && ( self.voted_for.is_none() || self.voted_for == Some(from) ) {
+					self.voted_for = Some(from);
+				}
+			}
+			// if a node is replying to request vote, increment its vote by 1
+			Message::RequestVoteReply {granted, .. } => {
+				if granted {
+					self.votes_received += 1;
+				}	
+			}
+			// catch-all for other vairants that we didn't includ
+			_ => {}
+		}	
 	}
 }
