@@ -24,3 +24,23 @@ struct Node {
 	votes_received: u64,
 	rx: mpsc::Receiver<Message>,
 }
+
+impl Node {
+	fn new(id: u64, rx: mpsc::Receiver<Message>) -> Self {
+		Node {
+			id,
+			state: NodeState::Follower,
+			current_term: 0,
+			voted_for: None,
+			votes_received: 0,
+			rx,
+		}
+	}
+	
+	fn start_election(&mut self) {
+		self.state = NodeState::Candidate;
+		self.current_term += 1;
+		self.voted_for = Some(self.id);
+		self.votes_received = 1;
+	}
+}
