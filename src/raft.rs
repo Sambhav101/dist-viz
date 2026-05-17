@@ -23,11 +23,12 @@ struct Node {
 	voted_for: Option<u64>,
 	votes_received: u64,
 	rx: mpsc::Receiver<Message>,
+	cluster_size: u64,
 }
 
 impl Node {
 	// constructor for our Node class
-	fn new(id: u64, rx: mpsc::Receiver<Message>) -> Self {
+	fn new(id: u64, rx: mpsc::Receiver<Message>, cluster_size: u64) -> Self {
 		Node {
 			id,
 			state: NodeState::Follower,
@@ -35,6 +36,7 @@ impl Node {
 			voted_for: None,
 			votes_received: 0,
 			rx,
+			cluster_size,
 		}
 	}
 	
@@ -55,10 +57,13 @@ impl Node {
 					self.voted_for = Some(from);
 				}
 			}
-			// if a node is replying to request vote, increment its vote by 1
+			// if a node is replying to request vote, increment its vote by 1, and make it a leader if it receives a majority vote
 			Message::RequestVoteReply {granted, .. } => {
 				if granted {
 					self.votes_received += 1;
+					if self.votes_received > self.cluster_size/2 {
+						self.state = NodeState::Leader;
+					}
 				}	
 			}
 			// catch-all for other vairants that we didn't includ
