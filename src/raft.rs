@@ -38,7 +38,7 @@ pub struct Envelope {
 
 impl Node {
     // constructor for our Node class
-    fn new(
+    pub fn new(
         id: u64,
         rx: mpsc::Receiver<Message>,
         tx: mpsc::Sender<Envelope>,

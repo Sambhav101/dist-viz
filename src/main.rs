@@ -1,5 +1,7 @@
 mod raft;
+mod simulation;
 
-fn main() {
-    println!("Hello, world!");
+#[tokio::main]
+async fn main() {
+    simulation::run_cluster(5).await;
 }
