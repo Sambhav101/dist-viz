@@ -55,11 +55,22 @@ impl Node {
     }
 
     // a candidate will start election and votes for itself
-    fn start_election(&mut self) {
+    async fn start_election(&mut self) {
         self.state = NodeState::Candidate;
         self.current_term += 1;
         self.voted_for = Some(self.id);
         self.votes_received = 1;
+
+        for peer in 0..self.cluster_size {
+            if peer == self.id {
+                continue;
+            }
+            let req = Message::RequestVote {
+                from: self.id,
+                term: self.current_term,
+            };
+            self.send_to(peer, req).await;
+        }
     }
 
     // when a node receives a requestVote, decide to grant the vote or not
