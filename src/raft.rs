@@ -203,3 +203,71 @@ impl Message {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_node(id: u64) -> (Node, mpsc::Receiver<Envelope>) {
+        let (hub_tx, hub_rx) = mpsc::channel(10);
+        let (_node_tx, node_rx) = mpsc::channel(10);
+        (Node::new(id, node_rx, hub_tx, 5), hub_rx)
+    }
+
+    #[tokio::test]
+    async fn grants_vote_once_per_term() {
+        let (mut node, mut hub) = make_node(0);
+
+        node.handle_message(Message::RequestVote { from: 1, term: 1 })
+            .await;
+        node.handle_message(Message::RequestVote { from: 2, term: 1 })
+            .await;
+
+        let first = hub.recv().await.unwrap();
+        let second = hub.recv().await.unwrap();
+        assert!(matches!(
+            first.msg,
+            Message::RequestVoteReply { granted: true, .. }
+        ));
+        assert!(matches!(
+            second.msg,
+            Message::RequestVoteReply { granted: false, .. }
+        ));
+        assert_eq!(node.voted_for, Some(1));
+    }
+
+    #[tokio::test]
+    async fn steps_down_on_higher_term() {
+        let (mut node, _hub) = make_node(0);
+        node.start_election().await;
+        assert_eq!(node.state, NodeState::Candidate);
+
+        node.handle_message(Message::AppendEntries { from: 3, term: 5 })
+            .await;
+
+        assert_eq!(node.state, NodeState::Follower);
+        assert_eq!(node.current_term, 5);
+        assert_eq!(node.voted_for, None);
+    }
+
+    #[tokio::test]
+    async fn becomes_leader_on_majority() {
+        let (mut node, _hub) = make_node(0);
+        node.start_election().await;
+
+        node.handle_message(Message::RequestVoteReply {
+            from: 1,
+            term: 1,
+            granted: true,
+        })
+        .await;
+        assert_eq!(node.state, NodeState::Candidate);
+        node.handle_message(Message::RequestVoteReply {
+            from: 2,
+            term: 1,
+            granted: true,
+        })
+        .await;
+        assert_eq!(node.state, NodeState::Leader);
+    }
+}
