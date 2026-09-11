@@ -105,8 +105,33 @@ impl Node {
                     }
                 }
             }
-            // catch-all for other vairants that we didn't includ
-            _ => {}
+            Message::AppendEntries { from, term } => {
+                let success = term == self.current_term;
+                if success {
+                    // a live leader exists for our term, so make sure we are follower
+                    self.state = NodeState::Follower;
+                }
+                let reply = Message::AppendEntriesReply {
+                    from: self.id,
+                    term: self.current_term,
+                    success,
+                };
+                self.send_to(from, reply).await;
+            }
+            Message::AppendEntriesReply { .. } => {}
+        }
+    }
+
+    async fn send_heartbeats(&self) {
+        for peer in 0..self.cluster_size {
+            if peer == self.id {
+                continue;
+            }
+            let hb = Message::AppendEntries {
+                from: self.id,
+                term: self.current_term,
+            };
+            self.send_to(peer, hb).await;
         }
     }
 
