@@ -1,6 +1,8 @@
+use rand::RngExt;
 use tokio::sync::mpsc;
+use tokio::time::{Duration, Instant, sleep_until};
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum NodeState {
     Follower,
     Candidate,
@@ -141,6 +143,52 @@ impl Node {
                 continue;
             }
             self.send_to(peer, msg.clone()).await;
+        }
+    }
+
+    fn election_timeout(&self) -> Duration {
+        Duration::from_millis(rand::rng().random_range(150..300))
+    }
+
+    fn heartbeat_interval(&self) -> Duration {
+        Duration::from_millis(50)
+    }
+
+    pub async fn run(mut self) {
+        let mut deadline = Instant::now() + self.election_timeout();
+
+        loop {
+            let before = self.state;
+
+            tokio::select! {
+                Some(msg) = self.rx.recv() => {
+                    let is_heartbeat = matches!(msg, Message::AppendEntries {..});
+                    self.handle_message(msg).await;
+                    if is_heartbeat {
+                        deadline = Instant::now() + self.election_timeout();
+                    }
+                }
+                _ = sleep_until(deadline) => {
+                    if self.state == NodeState::Leader {
+                        self.send_heartbeats().await;
+                        deadline = Instant::now() + self.heartbeat_interval();
+                    } else {
+                        self.start_election().await;
+                        deadline = Instant::now() + self.election_timeout();
+                    }
+                }
+                else => break,
+            }
+
+            if self.state != before {
+                println!(
+                    "node {} : {:?} -> {:?} (term {})",
+                    self.id, before, self.state, self.current_term
+                );
+                if self.state == NodeState::Leader {
+                    deadline = Instant::now();
+                }
+            }
         }
     }
 }
