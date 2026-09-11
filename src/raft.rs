@@ -7,7 +7,7 @@ pub enum NodeState {
     Leader,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Message {
     RequestVote { from: u64, term: u64 },
     RequestVoteReply { from: u64, term: u64, granted: bool },
@@ -61,16 +61,11 @@ impl Node {
         self.voted_for = Some(self.id);
         self.votes_received = 1;
 
-        for peer in 0..self.cluster_size {
-            if peer == self.id {
-                continue;
-            }
-            let req = Message::RequestVote {
-                from: self.id,
-                term: self.current_term,
-            };
-            self.send_to(peer, req).await;
-        }
+        let rq = Message::RequestVote {
+            from: self.id,
+            term: self.current_term,
+        };
+        self.broadcast(rq).await;
     }
 
     // when a node receives a requestVote, decide to grant the vote or not
@@ -122,17 +117,13 @@ impl Node {
         }
     }
 
+    // leader will send heartbeats often
     async fn send_heartbeats(&self) {
-        for peer in 0..self.cluster_size {
-            if peer == self.id {
-                continue;
-            }
-            let hb = Message::AppendEntries {
-                from: self.id,
-                term: self.current_term,
-            };
-            self.send_to(peer, hb).await;
-        }
+        let hb = Message::AppendEntries {
+            from: self.id,
+            term: self.current_term,
+        };
+        self.broadcast(hb).await;
     }
 
     async fn send_to(&self, to: u64, msg: Message) {
@@ -142,6 +133,15 @@ impl Node {
             msg,
         };
         let _ = self.tx.send(env).await;
+    }
+
+    async fn broadcast(&self, msg: Message) {
+        for peer in 0..self.cluster_size {
+            if peer == self.id {
+                continue;
+            }
+            self.send_to(peer, msg.clone()).await;
+        }
     }
 }
 
