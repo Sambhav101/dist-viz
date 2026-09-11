@@ -1,73 +1,273 @@
+use rand::RngExt;
 use tokio::sync::mpsc;
+use tokio::time::{Duration, Instant, sleep_until};
 
-#[derive(Debug)]
-enum NodeState {
-	Follower,
-	Candidate,
-	Leader,
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NodeState {
+    Follower,
+    Candidate,
+    Leader,
+}
+
+#[derive(Debug, Clone)]
+pub enum Message {
+    RequestVote { from: u64, term: u64 },
+    RequestVoteReply { from: u64, term: u64, granted: bool },
+    AppendEntries { from: u64, term: u64 },
+    AppendEntriesReply { from: u64, term: u64, success: bool },
 }
 
 #[derive(Debug)]
-enum Message {
-	RequestVote { from: u64, term: u64},
-	RequestVoteReply { from: u64, term: u64, granted: bool},
-	AppendEntries { from: u64, term: u64},
-	AppendEntriesReply { from: u64, term: u64, success: bool},
+pub struct Node {
+    id: u64,
+    state: NodeState,
+    current_term: u64,
+    voted_for: Option<u64>,
+    votes_received: u64,
+    rx: mpsc::Receiver<Message>,
+    tx: mpsc::Sender<Envelope>,
+    cluster_size: u64,
 }
 
 #[derive(Debug)]
-struct Node {
-	id: u64,
-	state: NodeState,
-	current_term: u64,
-	voted_for: Option<u64>,
-	votes_received: u64,
-	rx: mpsc::Receiver<Message>,
-	cluster_size: u64,
+pub struct Envelope {
+    pub from: u64,
+    pub to: u64,
+    pub msg: Message,
 }
 
 impl Node {
-	// constructor for our Node class
-	fn new(id: u64, rx: mpsc::Receiver<Message>, cluster_size: u64) -> Self {
-		Node {
-			id,
-			state: NodeState::Follower,
-			current_term: 0,
-			voted_for: None,
-			votes_received: 0,
-			rx,
-			cluster_size,
-		}
-	}
-	
-	// a candidate will start election and votes for itself
-	fn start_election(&mut self) {
-		self.state = NodeState::Candidate;
-		self.current_term += 1;
-		self.voted_for = Some(self.id);
-		self.votes_received = 1;
-	}
-	
-	// when a node receives a requestVote, decide to grant the vote or not
-	fn handle_message(&mut self, msg: Message) {
-		match msg {
-			// if a node is requesting vote, update voted for if conditions met
-			Message::RequestVote { from, term } => {
-				if term >= self.current_term && ( self.voted_for.is_none() || self.voted_for == Some(from) ) {
-					self.voted_for = Some(from);
-				}
-			}
-			// if a node is replying to request vote, increment its vote by 1, and make it a leader if it receives a majority vote
-			Message::RequestVoteReply {granted, .. } => {
-				if granted {
-					self.votes_received += 1;
-					if self.votes_received > self.cluster_size/2 {
-						self.state = NodeState::Leader;
-					}
-				}	
-			}
-			// catch-all for other vairants that we didn't includ
-			_ => {}
-		}	
-	}
+    // constructor for our Node class
+    pub fn new(
+        id: u64,
+        rx: mpsc::Receiver<Message>,
+        tx: mpsc::Sender<Envelope>,
+        cluster_size: u64,
+    ) -> Self {
+        Node {
+            id,
+            state: NodeState::Follower,
+            current_term: 0,
+            voted_for: None,
+            votes_received: 0,
+            rx,
+            tx,
+            cluster_size,
+        }
+    }
+
+    // a candidate will start election and votes for itself
+    async fn start_election(&mut self) {
+        self.state = NodeState::Candidate;
+        self.current_term += 1;
+        self.voted_for = Some(self.id);
+        self.votes_received = 1;
+
+        let rq = Message::RequestVote {
+            from: self.id,
+            term: self.current_term,
+        };
+        self.broadcast(rq).await;
+    }
+
+    // when a node receives a requestVote, decide to grant the vote or not
+    async fn handle_message(&mut self, msg: Message) {
+        // any message from higher term means we are stale
+        if msg.term() > self.current_term {
+            self.current_term = msg.term();
+            self.state = NodeState::Follower;
+            self.voted_for = None;
+        }
+
+        match msg {
+            // if a node is requesting vote, update voted for if conditions met
+            Message::RequestVote { from, term } => {
+                let granted = term == self.current_term
+                    && (self.voted_for.is_none() || self.voted_for == Some(from));
+                if granted {
+                    self.voted_for = Some(from);
+                }
+                let reply = Message::RequestVoteReply {
+                    from: self.id,
+                    term: self.current_term,
+                    granted,
+                };
+                self.send_to(from, reply).await;
+            }
+            Message::RequestVoteReply { granted, .. } => {
+                if granted {
+                    self.votes_received += 1;
+                    if self.votes_received > self.cluster_size / 2 {
+                        self.state = NodeState::Leader;
+                    }
+                }
+            }
+            Message::AppendEntries { from, term } => {
+                let success = term == self.current_term;
+                if success {
+                    // a live leader exists for our term, so make sure we are follower
+                    self.state = NodeState::Follower;
+                }
+                let reply = Message::AppendEntriesReply {
+                    from: self.id,
+                    term: self.current_term,
+                    success,
+                };
+                self.send_to(from, reply).await;
+            }
+            Message::AppendEntriesReply { .. } => {}
+        }
+    }
+
+    // leader will send heartbeats often
+    async fn send_heartbeats(&self) {
+        let hb = Message::AppendEntries {
+            from: self.id,
+            term: self.current_term,
+        };
+        self.broadcast(hb).await;
+    }
+
+    async fn send_to(&self, to: u64, msg: Message) {
+        let env = Envelope {
+            from: self.id,
+            to,
+            msg,
+        };
+        let _ = self.tx.send(env).await;
+    }
+
+    async fn broadcast(&self, msg: Message) {
+        for peer in 0..self.cluster_size {
+            if peer == self.id {
+                continue;
+            }
+            self.send_to(peer, msg.clone()).await;
+        }
+    }
+
+    fn election_timeout(&self) -> Duration {
+        Duration::from_millis(rand::rng().random_range(150..300))
+    }
+
+    fn heartbeat_interval(&self) -> Duration {
+        Duration::from_millis(50)
+    }
+
+    pub async fn run(mut self) {
+        let mut deadline = Instant::now() + self.election_timeout();
+
+        loop {
+            let before = self.state;
+
+            tokio::select! {
+                Some(msg) = self.rx.recv() => {
+                    let is_heartbeat = matches!(msg, Message::AppendEntries {..});
+                    self.handle_message(msg).await;
+                    if is_heartbeat {
+                        deadline = Instant::now() + self.election_timeout();
+                    }
+                }
+                _ = sleep_until(deadline) => {
+                    if self.state == NodeState::Leader {
+                        self.send_heartbeats().await;
+                        deadline = Instant::now() + self.heartbeat_interval();
+                    } else {
+                        self.start_election().await;
+                        deadline = Instant::now() + self.election_timeout();
+                    }
+                }
+                else => break,
+            }
+
+            if self.state != before {
+                println!(
+                    "node {} : {:?} -> {:?} (term {})",
+                    self.id, before, self.state, self.current_term
+                );
+                if self.state == NodeState::Leader {
+                    deadline = Instant::now();
+                }
+            }
+        }
+    }
+}
+
+impl Message {
+    pub fn term(&self) -> u64 {
+        match self {
+            Message::RequestVote { term, .. }
+            | Message::RequestVoteReply { term, .. }
+            | Message::AppendEntries { term, .. }
+            | Message::AppendEntriesReply { term, .. } => *term,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_node(id: u64) -> (Node, mpsc::Receiver<Envelope>) {
+        let (hub_tx, hub_rx) = mpsc::channel(10);
+        let (_node_tx, node_rx) = mpsc::channel(10);
+        (Node::new(id, node_rx, hub_tx, 5), hub_rx)
+    }
+
+    #[tokio::test]
+    async fn grants_vote_once_per_term() {
+        let (mut node, mut hub) = make_node(0);
+
+        node.handle_message(Message::RequestVote { from: 1, term: 1 })
+            .await;
+        node.handle_message(Message::RequestVote { from: 2, term: 1 })
+            .await;
+
+        let first = hub.recv().await.unwrap();
+        let second = hub.recv().await.unwrap();
+        assert!(matches!(
+            first.msg,
+            Message::RequestVoteReply { granted: true, .. }
+        ));
+        assert!(matches!(
+            second.msg,
+            Message::RequestVoteReply { granted: false, .. }
+        ));
+        assert_eq!(node.voted_for, Some(1));
+    }
+
+    #[tokio::test]
+    async fn steps_down_on_higher_term() {
+        let (mut node, _hub) = make_node(0);
+        node.start_election().await;
+        assert_eq!(node.state, NodeState::Candidate);
+
+        node.handle_message(Message::AppendEntries { from: 3, term: 5 })
+            .await;
+
+        assert_eq!(node.state, NodeState::Follower);
+        assert_eq!(node.current_term, 5);
+        assert_eq!(node.voted_for, None);
+    }
+
+    #[tokio::test]
+    async fn becomes_leader_on_majority() {
+        let (mut node, _hub) = make_node(0);
+        node.start_election().await;
+
+        node.handle_message(Message::RequestVoteReply {
+            from: 1,
+            term: 1,
+            granted: true,
+        })
+        .await;
+        assert_eq!(node.state, NodeState::Candidate);
+        node.handle_message(Message::RequestVoteReply {
+            from: 2,
+            term: 1,
+            granted: true,
+        })
+        .await;
+        assert_eq!(node.state, NodeState::Leader);
+    }
 }
