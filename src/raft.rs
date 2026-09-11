@@ -63,17 +63,29 @@ impl Node {
     }
 
     // when a node receives a requestVote, decide to grant the vote or not
-    fn handle_message(&mut self, msg: Message) {
+    async fn handle_message(&mut self, msg: Message) {
+        // any message from higher term means we are stale
+        if msg.term() > self.current_term {
+            self.current_term = msg.term();
+            self.state = NodeState::Follower;
+            self.voted_for = None;
+        }
+
         match msg {
             // if a node is requesting vote, update voted for if conditions met
             Message::RequestVote { from, term } => {
-                if term >= self.current_term
-                    && (self.voted_for.is_none() || self.voted_for == Some(from))
-                {
+                let granted = term == self.current_term
+                    && (self.voted_for.is_none() || self.voted_for == Some(from));
+                if granted {
                     self.voted_for = Some(from);
                 }
+                let reply = Message::RequestVoteReply {
+                    from: self.id,
+                    term: self.current_term,
+                    granted,
+                };
+                self.send_to(from, reply).await;
             }
-            // if a node is replying to request vote, increment its vote by 1, and make it a leader if it receives a majority vote
             Message::RequestVoteReply { granted, .. } => {
                 if granted {
                     self.votes_received += 1;
@@ -84,6 +96,26 @@ impl Node {
             }
             // catch-all for other vairants that we didn't includ
             _ => {}
+        }
+    }
+
+    async fn send_to(&self, to: u64, msg: Message) {
+        let env = Envelope {
+            from: self.id,
+            to,
+            msg,
+        };
+        let _ = self.tx.send(env).await;
+    }
+}
+
+impl Message {
+    pub fn term(&self) -> u64 {
+        match self {
+            Message::RequestVote { term, .. }
+            | Message::RequestVoteReply { term, .. }
+            | Message::AppendEntries { term, .. }
+            | Message::AppendEntriesReply { term, .. } => *term,
         }
     }
 }
