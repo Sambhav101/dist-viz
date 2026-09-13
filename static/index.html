@@ -1,0 +1,9 @@
+<!DOCTYPE html>
+<pre id="log"></pre>
+<script>
+  const log = document.getElementById("log");
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onmessage = (e) => {
+    log.textContent = e.data + "\n" + log.textContent.slice(0, 5000);
+  };
+</script>
