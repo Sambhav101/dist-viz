@@ -1,15 +1,17 @@
 use rand::RngExt;
+use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant, sleep_until};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum NodeState {
     Follower,
     Candidate,
     Leader,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
 pub enum Message {
     RequestVote { from: u64, term: u64 },
     RequestVoteReply { from: u64, term: u64, granted: bool },
