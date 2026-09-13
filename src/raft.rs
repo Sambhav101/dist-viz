@@ -1,6 +1,7 @@
+use crate::events::Event;
 use rand::RngExt;
 use serde::Serialize;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio::time::{Duration, Instant, sleep_until};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -28,6 +29,7 @@ pub struct Node {
     votes_received: u64,
     rx: mpsc::Receiver<Message>,
     tx: mpsc::Sender<Envelope>,
+    events: broadcast::Sender<Event>,
     cluster_size: u64,
 }
 
@@ -44,6 +46,7 @@ impl Node {
         id: u64,
         rx: mpsc::Receiver<Message>,
         tx: mpsc::Sender<Envelope>,
+        events: broadcast::Sender<Event>,
         cluster_size: u64,
     ) -> Self {
         Node {
@@ -54,6 +57,7 @@ impl Node {
             votes_received: 0,
             rx,
             tx,
+            events,
             cluster_size,
         }
     }
@@ -187,6 +191,11 @@ impl Node {
                     "node {} : {:?} -> {:?} (term {})",
                     self.id, before, self.state, self.current_term
                 );
+                let _ = self.events.send(Event::StateChanged {
+                    id: self.id,
+                    state: self.state,
+                    term: self.current_term,
+                });
                 if self.state == NodeState::Leader {
                     deadline = Instant::now();
                 }
@@ -213,7 +222,8 @@ mod tests {
     fn make_node(id: u64) -> (Node, mpsc::Receiver<Envelope>) {
         let (hub_tx, hub_rx) = mpsc::channel(10);
         let (_node_tx, node_rx) = mpsc::channel(10);
-        (Node::new(id, node_rx, hub_tx, 5), hub_rx)
+        let (events, _) = broadcast::channel(10);
+        (Node::new(id, node_rx, hub_tx, events, 5), hub_rx)
     }
 
     #[tokio::test]
